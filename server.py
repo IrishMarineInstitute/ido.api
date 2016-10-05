@@ -5,6 +5,8 @@ from tornado.ioloop import IOLoop, PeriodicCallback
 from tornado import gen, httpclient, web, websocket
 import json
 from datetime import datetime, timedelta
+import csv
+import cStringIO
 
 import time
 httpclient.AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
@@ -263,8 +265,7 @@ class WSHandler(websocket.WebSocketHandler):
         periodic.start()
         self.periodic = periodic
 
-class IndexHandler(tornado.web.RequestHandler):                              
-
+class JsonLinesHandler(tornado.web.RequestHandler): 
     @tornado.web.asynchronous                                                
     @tornado.gen.engine                                                      
     def get(self,name):                                                           
@@ -278,9 +279,44 @@ class IndexHandler(tornado.web.RequestHandler):
         service.on_page_done = flush
         service.get_arguments(self)
         service.cb()
+
+class CsvHandler(tornado.web.RequestHandler): 
+    csv_fields = None
+    ocsv = None
+    stringio = None
+    @tornado.web.asynchronous                                                
+    @tornado.gen.engine
+    def get(self,name):
+        self.stringio = cStringIO.StringIO()
+        def write_message(msg):
+            if self.ocsv == None:
+               header = False
+               if self.csv_fields == None:
+                  self.csv_fields = [ key for key in msg ]
+                  header = True
+               self.stringio = cStringIO.StringIO()
+               self.ocsv = csv.DictWriter(self.stringio,self.csv_fields)
+               if header:
+                  self.ocsv.writeheader()
+            self.ocsv.writerow(msg)
+
+        service = get_service_provider(name,write_message)
+        service.callback = self.finish
+        def flush():
+            if self.stringio:
+              self.write(self.stringio.getvalue())
+              self.flush()
+            self.ocsv = None
+            self.stringio = None
+
+        service.on_page_done = flush
+        service.get_arguments(self)
+        service.cb()
+    
     
 application = tornado.web.Application([
-    (r"/data/mi/(tides|waves)$", IndexHandler),
+    (r"/data/mi/(tides|waves)$", JsonLinesHandler),
+    (r"/data/mi/(tides|waves).csv$", CsvHandler),
     (r"/ws/mi/(tides|waves)$", WSHandler),
     ])
 
