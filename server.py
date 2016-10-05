@@ -9,12 +9,95 @@ from datetime import datetime, timedelta
 import time
 httpclient.AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
 
+def is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+class TimeAggregator():
+  time_format = '%Y-%m-%dT%H:%M:%SZ'
+  def __init__(self,time_field,write_message,group_field=None):
+     self.time_field = time_field
+     self.group_field = group_field
+     self.grouped = {}
+     self.current_timestamp = None
+     self.write_message = write_message
+
+  def append(self,o):
+     ti = datetime.strptime(o[self.time_field], "%Y-%m-%dT%H:%M:%SZ")
+     timestamp = ti.strftime(self.time_format)
+     if timestamp != self.current_timestamp:
+       self.flush()
+       self.current_timestamp = timestamp
+     key = None
+     if self.group_field:
+       key = o[self.group_field]
+     if key not in self.grouped:
+       self.grouped[key] = []
+     self.grouped[key].append(o)
+
+  def aggregate(self,values):
+     agg = {}
+     agg["{0}_min".format(self.time_field)] = values[0][self.time_field]
+     agg["{0}_max".format(self.time_field)] = values[-1][self.time_field]
+     for field in values[0]:
+       if field == self.time_field:
+         continue
+       # not sure about selecting first location
+       if field in [self.group_field,'latitude','longitude']:
+         agg[field] = values[0][field]
+         continue
+       if is_number(values[0][field]):
+         total = values[0][field] - values[0][field]
+         minv = values[0][field]
+         mint = values[0][self.time_field]
+         maxv = values[0][field]
+         maxt = values[0][self.time_field]
+         for o in values:
+            value = o[field]
+            total += value
+            if value < minv:
+              minv = value
+              mint = o[self.time_field] 
+            if value > maxv:
+              maxv = value
+              maxt = o[self.time_field]
+         agg["{0}_mean".format(field)] = total/float(len(values))
+         agg["{0}_min".format(field)] = minv
+         agg["{0}_min_{1}".format(field,self.time_field)] = mint
+         agg["{0}_max".format(field)] = maxv
+         agg["{0}_max_{1}".format(field,self.time_field)] = maxt
+
+     return agg
+      
+  def flush(self):
+     for key in self.grouped:
+        self.write_message(self.aggregate(self.grouped[key]))
+     self.grouped = {}
+
+class HourlyAggregator(TimeAggregator):
+  time_format = '%Y-%m-%dT%H'
+
+class DailyAggregator(TimeAggregator):
+  time_format = '%Y-%m-%d'
+
+class MonthlyAggregator(TimeAggregator):
+  time_format = '%Y-%m'
+
+class YearlyAggregator(TimeAggregator):
+  time_format = '%Y'
+
 class Timeseries():
   time_field = "time"
   poll_frequency = 30000
   default_since_days = 7
   default_until_days = 7
   page_days = 14
+  aggregator = None
+  group_field = None
+
   def get_arguments(self,req):
     
     since = req.get_argument("since",None)
@@ -43,10 +126,34 @@ class Timeseries():
     lonmax = req.get_argument("longitude<",None)
     if(lonmax):
       self.lonmax = float(lonmax)  
+
+    agg = req.get_argument("aggregate",None)
+    if agg == "daily":
+       self.aggregator = DailyAggregator(self.time_field,
+                                         self.write_message,
+                                         self.group_field)
+    elif agg == "monthly":
+       self.aggregator = MonthlyAggregator(self.time_field,
+                                         self.write_message,
+                                         self.group_field)
+    elif agg == "yearly":
+       self.aggregator = YearlAggregator(self.time_field,
+                                         self.write_message,
+                                         self.group_field)
+    elif agg == "hourly":
+       self.aggregator = HourlyAggregator(self.time_field,
+                                         self.write_message,
+                                         self.group_field)
   
   def __init__(self,write,callback=None):
       self.write_message = write
       self.callback = callback
+
+  def append_to_output(self,o):
+      if self.aggregator:
+         self.aggregator.append(o)
+      else:
+         self.write_message(o)
 
   def get_urls(self):
     urls = []
@@ -82,9 +189,13 @@ class Timeseries():
                if col == self.time_field:
                   newsince = row[i]
             if o[self.time_field] > self.since:
-              self.write_message(o)
+              self.append_to_output(o)
+
         self.since = newsince
         self.on_page_done()
+
+    if self.aggregator:
+      self.aggregator.flush()
 
     if self.callback:
        self.callback()
@@ -103,12 +214,13 @@ class Timeseries():
     return params
 
 class IWaveBNetwork(Timeseries):
-
+  group_field = "station_id"
   def get_url(self,start_time,end_time):
     base = "http://erddap.dm.marine.ie/erddap/tabledap/IWaveBNetwork.json?longitude,latitude,time,station_id,PeakPeriod,PeakDirection,UpcrossPeriod,SignificantWaveHeight,SeaTemperature"
     return "{0}{1}".format(base,self.format_params(start_time,end_time))
 
 class IrishNationalTideGaugeNetwork(Timeseries):
+  group_field = "station_id"
   def get_url(self,start_time,end_time):
     base = "http://erddap.dm.marine.ie/erddap/tabledap/IrishNationalTideGaugeNetwork.json?longitude,latitude,altitude,time,station_id,Water_Level,Water_Level_LAT,Water_Level_OD_Malin,QC_Flag"
     return "{0}{1}".format(base,self.format_params(start_time,end_time))
