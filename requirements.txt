@@ -18,5 +18,5 @@ python-dateutil==2.5.3
 pytz==2016.7
 singledispatch==3.4.0.3
 six==1.10.0
-tornado==6.3.2
+tornado==6.3.3
 xlrd==1.0.0
